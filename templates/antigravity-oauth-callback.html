@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{TITLE}}</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --page: #ffffff;
+        --panel: rgba(255, 251, 245, 0.94);
+        --border: rgba(118, 92, 58, 0.22);
+        --text: #271d18;
+        --muted: #5b4d45;
+        --success: #2f7f56;
+        --error: #a3473f;
+        --shadow: rgba(84, 64, 46, 0.2);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: 24px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background:
+          linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.42) 0%,
+            rgba(255, 255, 255, 0.74) 100%
+          ),
+          url("{{BACKGROUND_IMAGE}}") center center / cover no-repeat,
+          var(--page);
+        color: var(--text);
+      }
+
+      main {
+        position: relative;
+        z-index: 1;
+        width: min(680px, 100%);
+      }
+
+      .panel {
+        position: relative;
+        z-index: 1;
+        width: min(680px, 100%);
+        padding: 32px;
+        border: 1px solid var(--border);
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: 0 24px 80px var(--shadow);
+        text-align: center;
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #8d6e4c;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 4vw, 40px);
+        line-height: 1.05;
+      }
+
+      h1.success {
+        color: var(--success);
+      }
+
+      h1.error {
+        color: var(--error);
+      }
+
+      p {
+        margin: 16px 0 0;
+        max-width: 56ch;
+        font-size: 16px;
+        line-height: 1.6;
+        color: var(--muted);
+        margin-inline: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">Monet OAuth Callback</p>
+        <h1 class="{{TONE}}">{{HEADING}}</h1>
+        <p>{{MESSAGE}}</p>
+      </section>
+    </main>
+  </body>
+</html>
