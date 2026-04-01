@@ -1,16 +1,28 @@
 {
   "name": "monet-code",
-  "version": "0.1.0",
-  "description": "Local provider manager and Claude Code launcher for Monet.",
+  "version": "0.1.1",
+  "description": "Provider manager and Claude Code launcher.",
   "type": "module",
   "bin": {
     "monet": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "assets",
+    "templates",
+    "README.md",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
+    "prepack": "npm run build && node scripts/bundle-antigravity-defaults.mjs write",
+    "postpack": "node scripts/bundle-antigravity-defaults.mjs clean",
     "start": "node dist/cli.js",
-    "test": "node --test --import tsx test/**/*.test.ts"
+    "test": "node --test --import tsx test/*.test.ts"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=20"

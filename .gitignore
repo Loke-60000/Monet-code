@@ -3,4 +3,5 @@ node_modules/
 .tmp-inspect/
 .env
 .env.local
+assets/antigravity-oauth-defaults.json
 ressources/

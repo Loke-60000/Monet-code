@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import type { AnthropicMessagesPayload } from "../src/core/anthropic.js";
@@ -13,6 +15,39 @@ test("resolveRequestedModel adds the default Antigravity tier", () => {
 
   assert.equal(resolved.actualModel, "gemini-3-pro-low");
   assert.equal(resolved.thinkingLevel, "low");
+});
+
+test("loadBundledAntigravityDefaults reads packaged OAuth defaults", async () => {
+  const defaultsPath = join(
+    process.cwd(),
+    "assets",
+    "antigravity-oauth-defaults.json",
+  );
+
+  await mkdir(dirname(defaultsPath), { recursive: true });
+  await writeFile(
+    defaultsPath,
+    `${JSON.stringify(
+      {
+        clientId: "bundled-client-id",
+        clientSecret: "bundled-client-secret",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  try {
+    __testExports.resetBundledAntigravityDefaultsCache();
+    assert.deepEqual(__testExports.loadBundledAntigravityDefaults(), {
+      clientId: "bundled-client-id",
+      clientSecret: "bundled-client-secret",
+    });
+  } finally {
+    __testExports.resetBundledAntigravityDefaultsCache();
+    await rm(defaultsPath, { force: true });
+  }
 });
 
 test("buildAntigravityRequest wraps Anthropic payloads for Antigravity", () => {

@@ -53,6 +53,10 @@ const ANTIGRAVITY_CALLBACK_TEMPLATE_PATH = resolvePackageFile(
   "templates",
   "antigravity-oauth-callback.html",
 );
+const ANTIGRAVITY_BUNDLED_DEFAULTS_PATH = resolvePackageFile(
+  "assets",
+  "antigravity-oauth-defaults.json",
+);
 const ANTIGRAVITY_CALLBACK_BACKGROUND_IMAGE_ROUTE =
   "/oauth-callback-background.png";
 const ANTIGRAVITY_CALLBACK_BACKGROUND_IMAGE_PATH = resolvePackageFile(
@@ -84,24 +88,76 @@ const UNSUPPORTED_SCHEMA_KEYS = new Set<string>([
   "$comment",
 ]);
 
-function resolveRequiredAntigravityEnv(envName: string): string {
-  const value = process.env[envName]?.trim();
-
-  if (value) {
-    return value;
-  }
-
-  throw new Error(
-    `Missing required environment variable ${envName}. Add it to .env before using the Antigravity provider.`,
+function getAntigravityClientId(): string {
+  return resolveAntigravityCredential(
+    "MONET_ANTIGRAVITY_CLIENT_ID",
+    "clientId",
   );
 }
 
-function getAntigravityClientId(): string {
-  return resolveRequiredAntigravityEnv("MONET_ANTIGRAVITY_CLIENT_ID");
+function getAntigravityClientSecret(): string {
+  return resolveAntigravityCredential(
+    "MONET_ANTIGRAVITY_CLIENT_SECRET",
+    "clientSecret",
+  );
 }
 
-function getAntigravityClientSecret(): string {
-  return resolveRequiredAntigravityEnv("MONET_ANTIGRAVITY_CLIENT_SECRET");
+type AntigravityBundledDefaults = {
+  clientId?: string;
+  clientSecret?: string;
+};
+
+let antigravityBundledDefaultsCache:
+  | AntigravityBundledDefaults
+  | null
+  | undefined;
+
+function resolveAntigravityCredential(
+  envName: string,
+  key: keyof Required<AntigravityBundledDefaults>,
+): string {
+  const envValue = process.env[envName]?.trim();
+
+  if (envValue) {
+    return envValue;
+  }
+
+  const bundledDefaults = loadBundledAntigravityDefaults();
+  const bundledValue = bundledDefaults?.[key]?.trim();
+
+  if (bundledValue) {
+    return bundledValue;
+  }
+
+  throw new Error(
+    `Missing required Antigravity OAuth value ${envName}. Set it in your environment, or install a package built with bundled Antigravity defaults.`,
+  );
+}
+
+function loadBundledAntigravityDefaults(): AntigravityBundledDefaults | null {
+  if (antigravityBundledDefaultsCache !== undefined) {
+    return antigravityBundledDefaultsCache;
+  }
+
+  if (!existsSync(ANTIGRAVITY_BUNDLED_DEFAULTS_PATH)) {
+    antigravityBundledDefaultsCache = null;
+    return antigravityBundledDefaultsCache;
+  }
+
+  try {
+    const parsed = JSON.parse(
+      readFileSync(ANTIGRAVITY_BUNDLED_DEFAULTS_PATH, "utf8"),
+    ) as AntigravityBundledDefaults;
+
+    antigravityBundledDefaultsCache = {
+      clientId: parsed.clientId?.trim(),
+      clientSecret: parsed.clientSecret?.trim(),
+    };
+  } catch {
+    antigravityBundledDefaultsCache = null;
+  }
+
+  return antigravityBundledDefaultsCache;
 }
 
 interface AntigravityOAuthState {
@@ -2793,4 +2849,8 @@ export const __testExports = {
   extractAntigravityRetryDelayMs,
   ensureRequestThoughtSignature,
   extractExplicitAntigravityStreamStopReason,
+  loadBundledAntigravityDefaults,
+  resetBundledAntigravityDefaultsCache: () => {
+    antigravityBundledDefaultsCache = undefined;
+  },
 };
