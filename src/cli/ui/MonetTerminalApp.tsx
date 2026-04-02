@@ -265,6 +265,7 @@ function MonetTerminalApp({
       {screen === "copilot-device-auth" && snapshot.copilotDeviceFlow ? (
         <CopilotDeviceAuthScreen
           flow={snapshot.copilotDeviceFlow}
+          statusMessage={snapshot.statusMessage}
           onBack={() => complete({ type: "cancel-copilot-device-auth" })}
           onContinue={() =>
             complete({
@@ -775,13 +776,23 @@ function CopilotAuthScreen({
 
 function CopilotDeviceAuthScreen({
   flow,
+  statusMessage,
   onBack,
   onContinue,
 }: {
   flow: MonetCopilotDeviceFlowSnapshot;
+  statusMessage?: string;
   onBack(): void;
   onContinue(): void;
 }): React.JSX.Element {
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    if (statusMessage) {
+      setIsSubmitting(false);
+    }
+  }, [statusMessage]);
+
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text bold>GitHub Device Login</Text>
@@ -800,23 +811,35 @@ function CopilotDeviceAuthScreen({
         </Text>
       </Box>
       <Box marginTop={1}>
-        <SelectInput
-          items={[
-            {
-              label: "I finished login in the browser",
-              value: "continue",
-            },
-            { label: "Cancel", value: "cancel" },
-          ]}
-          onSelect={(item) => {
-            if (item.value === "continue") {
-              onContinue();
-              return;
-            }
+        {isSubmitting ? (
+          <Box flexDirection="column">
+            <Text color="yellow">Waiting for GitHub to confirm the device login...</Text>
+            <Text dimColor>
+              Monet will continue automatically as soon as GitHub returns the access token.
+            </Text>
+          </Box>
+        ) : (
+          <SelectInput
+            items={[
+              {
+                label: "I finished login in the browser",
+                value: "continue",
+              },
+              { label: "Cancel", value: "cancel" },
+            ]}
+            onSelect={(item) => {
+              if (item.value === "continue") {
+                setIsSubmitting(true);
+                setTimeout(() => {
+                  onContinue();
+                }, 0);
+                return;
+              }
 
-            onBack();
-          }}
-        />
+              onBack();
+            }}
+          />
+        )}
       </Box>
     </Box>
   );

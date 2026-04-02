@@ -1,6 +1,6 @@
 {
   "name": "monet-code",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Provider manager and Claude Code launcher.",
   "type": "module",
   "bin": {
