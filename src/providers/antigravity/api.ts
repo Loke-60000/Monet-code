@@ -49,6 +49,8 @@ const ANTIGRAVITY_SYSTEM_INSTRUCTION =
   "You are Antigravity, a powerful agentic AI coding assistant designed by the Google DeepMind team working on Advanced Agentic Coding.";
 const EMPTY_SCHEMA_PLACEHOLDER_NAME = "_placeholder";
 const EMPTY_SCHEMA_PLACEHOLDER_DESCRIPTION = "Placeholder. Always pass true.";
+const EMPTY_ASSISTANT_FALLBACK_TEXT =
+  "Antigravity returned no assistant content for this turn. Please retry.";
 const ANTIGRAVITY_CALLBACK_TEMPLATE_PATH = resolvePackageFile(
   "templates",
   "antigravity-oauth-callback.html",
@@ -63,6 +65,37 @@ const ANTIGRAVITY_CALLBACK_BACKGROUND_IMAGE_PATH = resolvePackageFile(
   "assets",
   "claude-monet-ascii.png",
 );
+const CLAUDE_TASK_TOOL_NAMES = new Set(["default_api:Task", "Task"]);
+const CLAUDE_AGENT_TYPE_ALIASES = new Map<string, string>([
+  ["plan", "Plan"],
+  ["planner", "Plan"],
+  ["planning", "Plan"],
+  ["explore", "Explore"],
+  ["repo_inspector", "Explore"],
+  ["repo-inspector", "Explore"],
+  ["repository-inspector", "Explore"],
+  ["codeanalyzer", "Explore"],
+  ["code-analyzer", "Explore"],
+  ["inspector", "Explore"],
+  ["research", "Explore"],
+  ["researcher", "Explore"],
+  ["general-purpose", "general-purpose"],
+  ["generalpurpose", "general-purpose"],
+  ["general", "general-purpose"],
+  ["worker", "general-purpose"],
+  ["implementer", "general-purpose"],
+  ["developer", "general-purpose"],
+  ["coder", "general-purpose"],
+  ["verification", "verification"],
+  ["verify", "verification"],
+  ["verifier", "verification"],
+  ["review", "verification"],
+  ["reviewer", "verification"],
+  ["test", "verification"],
+  ["tester", "verification"],
+  ["qa", "verification"],
+  ["statusline-setup", "statusline-setup"],
+]);
 const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
   "minLength",
   "maxLength",
@@ -553,7 +586,11 @@ export class AntigravityBackend implements ProviderBackend {
         );
       }
 
-      return createAnthropicErrorResponse(response.status, body, retryDelayMs);
+      return createAnthropicErrorResponse(
+        response.status,
+        summarizeAntigravityErrorMessage(response.status, body),
+        retryDelayMs,
+      );
     }
 
     if (payload.stream) {
@@ -902,12 +939,20 @@ function buildAntigravityContents(
 ): Array<Record<string, unknown>> {
   const toolNamesById = new Map<string, string>();
   const contents: Array<Record<string, unknown>> = [];
+  const trajectoryState = {
+    lastThoughtSignature: undefined as string | undefined,
+    preserveFunctionCallThoughtSignatures,
+  };
 
   for (const message of messages) {
+    if (message.role === "user" && !messageContainsOnlyToolResults(message)) {
+      trajectoryState.lastThoughtSignature = undefined;
+    }
+
     const parts = buildAntigravityParts(
       message,
       toolNamesById,
-      preserveFunctionCallThoughtSignatures,
+      trajectoryState,
     );
     if (parts.length === 0) {
       continue;
@@ -925,16 +970,18 @@ function buildAntigravityContents(
 function buildAntigravityParts(
   message: AnthropicMessagesPayload["messages"][number],
   toolNamesById: Map<string, string>,
-  preserveFunctionCallThoughtSignatures: boolean,
+  trajectoryState: {
+    lastThoughtSignature?: string;
+    preserveFunctionCallThoughtSignatures: boolean;
+  },
 ): Array<Record<string, unknown>> {
   if (typeof message.content === "string") {
     return buildTextPart(message.content);
   }
 
   const state = {
-    lastThoughtSignature: undefined as string | undefined,
     annotatedFunctionCall: false,
-    preserveFunctionCallThoughtSignatures,
+    trajectoryState,
   };
 
   return message.content.flatMap((block) =>
@@ -947,9 +994,11 @@ function buildAntigravityPart(
   role: AnthropicMessagesPayload["messages"][number]["role"],
   toolNamesById: Map<string, string>,
   state: {
-    lastThoughtSignature?: string;
     annotatedFunctionCall: boolean;
-    preserveFunctionCallThoughtSignatures: boolean;
+    trajectoryState: {
+      lastThoughtSignature?: string;
+      preserveFunctionCallThoughtSignatures: boolean;
+    };
   },
 ): Array<Record<string, unknown>> {
   if (!isRecord(block)) {
@@ -976,7 +1025,7 @@ function buildAntigravityPart(
     }
 
     if (thoughtSignature) {
-      state.lastThoughtSignature = thoughtSignature;
+      state.trajectoryState.lastThoughtSignature = thoughtSignature;
     }
 
     return [
@@ -1021,15 +1070,15 @@ function buildAntigravityPart(
     const extractedThoughtSignature = extractThoughtSignature(block);
     const thoughtSignature = extractedThoughtSignature
       ? ensureRequestThoughtSignature(extractedThoughtSignature)
-      : state.preserveFunctionCallThoughtSignatures &&
+      : state.trajectoryState.preserveFunctionCallThoughtSignatures &&
           !state.annotatedFunctionCall
-        ? (state.lastThoughtSignature ?? SKIP_THOUGHT_SIGNATURE)
+        ? (state.trajectoryState.lastThoughtSignature ?? SKIP_THOUGHT_SIGNATURE)
         : undefined;
 
     if (thoughtSignature) {
       state.annotatedFunctionCall = true;
+      state.trajectoryState.lastThoughtSignature = thoughtSignature;
     }
-    state.lastThoughtSignature = undefined;
 
     const functionCall: Record<string, unknown> = {
       ...(id ? { id } : {}),
@@ -1064,6 +1113,25 @@ function buildAntigravityPart(
   }
 
   return [];
+}
+
+function messageContainsOnlyToolResults(
+  message: AnthropicMessagesPayload["messages"][number],
+): boolean {
+  if (message.role !== "user") {
+    return false;
+  }
+
+  if (typeof message.content === "string") {
+    return false;
+  }
+
+  return (
+    message.content.length > 0 &&
+    message.content.every(
+      (block) => isRecord(block) && block.type === "tool_result",
+    )
+  );
 }
 
 function buildTextPart(text: unknown): Array<Record<string, unknown>> {
@@ -1750,19 +1818,38 @@ function buildAnthropicMessageResponse(
   normalized: AntigravityNormalizedResponse,
   model: string,
 ): AnthropicMessageResponse {
+  const content = ensureNonEmptyAssistantContent(normalized.content);
+  const stopReason =
+    normalized.content.length > 0 ? normalized.stopReason : "end_turn";
+
   return {
     id: normalized.id,
     type: "message",
     role: "assistant",
-    content: normalized.content,
+    content,
     model,
-    stop_reason: normalized.stopReason,
+    stop_reason: stopReason,
     stop_sequence: null,
     usage: {
       input_tokens: normalized.inputTokens,
       output_tokens: normalized.outputTokens,
     },
   };
+}
+
+function ensureNonEmptyAssistantContent(
+  content: AnthropicAssistantContentBlock[],
+): AnthropicAssistantContentBlock[] {
+  if (content.length > 0) {
+    return content;
+  }
+
+  return [
+    {
+      type: "text",
+      text: EMPTY_ASSISTANT_FALLBACK_TEXT,
+    },
+  ];
 }
 
 function unwrapAntigravityPayload(
@@ -1843,16 +1930,21 @@ function normalizeContentBlock(
 
   if (entry.type === "tool_use" && typeof entry.name === "string") {
     const signature = extractThoughtSignature(entry);
+    const normalizedInput = normalizeClaudeToolUseInput(
+      entry.name,
+      normalizeJsonObject(entry.input),
+    );
 
-    return [
+    return buildNormalizedToolUseBlocks(
       {
         type: "tool_use",
         id: normalizeToolId(entry.id, index),
         name: entry.name,
-        input: normalizeJsonObject(entry.input),
+        input: normalizedInput,
         ...(signature ? { signature } : {}),
       },
-    ];
+      signature,
+    );
   }
 
   return [];
@@ -1899,19 +1991,49 @@ function normalizeCandidatePart(
     }
 
     const signature = extractThoughtSignature(entry);
+    const normalizedInput = normalizeClaudeToolUseInput(
+      name,
+      normalizeJsonObject(functionCall.args),
+    );
 
-    return [
+    return buildNormalizedToolUseBlocks(
       {
         type: "tool_use",
         id: normalizeToolId(functionCall.id, index),
         name,
-        input: normalizeJsonObject(functionCall.args),
+        input: normalizedInput,
         ...(signature ? { signature } : {}),
       },
-    ];
+      signature,
+    );
   }
 
   return [];
+}
+
+function buildNormalizedToolUseBlocks(
+  toolUse: {
+    type: "tool_use";
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+    signature?: string;
+  },
+  signature?: string,
+): AnthropicAssistantContentBlock[] {
+  const blocks: AnthropicAssistantContentBlock[] = [];
+
+  if (signature) {
+    blocks.push({
+      type: "thinking",
+      thinking: "",
+      signature,
+    });
+  }
+
+  blocks.push(toolUse);
+
+  return blocks;
 }
 
 function mergeAdjacentTextBlocks(
@@ -1949,6 +2071,106 @@ function normalizeJsonObject(value: unknown): Record<string, unknown> {
   }
 
   return {};
+}
+
+function normalizeClaudeToolUseInput(
+  toolName: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!CLAUDE_TASK_TOOL_NAMES.has(toolName)) {
+    return input;
+  }
+
+  const normalized = { ...input };
+  const prompt =
+    typeof normalized.prompt === "string" && normalized.prompt.trim().length > 0
+      ? normalized.prompt.trim()
+      : undefined;
+  const subagentType = normalizeClaudeTaskSubagentType(
+    typeof normalized.subagent_type === "string"
+      ? normalized.subagent_type
+      : undefined,
+    prompt,
+  );
+
+  if (subagentType) {
+    normalized.subagent_type = subagentType;
+  }
+
+  if (
+    typeof normalized.description !== "string" ||
+    normalized.description.trim().length === 0
+  ) {
+    normalized.description = buildClaudeTaskDescription(prompt, subagentType);
+  }
+
+  return normalized;
+}
+
+function normalizeClaudeTaskSubagentType(
+  value: string | undefined,
+  prompt: string | undefined,
+): string {
+  const normalizedValue =
+    typeof value === "string" ? value.trim().toLowerCase() : "";
+
+  if (normalizedValue) {
+    const alias = CLAUDE_AGENT_TYPE_ALIASES.get(normalizedValue);
+    if (alias) {
+      return alias;
+    }
+  }
+
+  return inferClaudeTaskSubagentTypeFromPrompt(prompt);
+}
+
+function inferClaudeTaskSubagentTypeFromPrompt(
+  prompt: string | undefined,
+): string {
+  const normalizedPrompt = prompt?.trim().toLowerCase() ?? "";
+
+  if (
+    /(verify|verification|review|check|test|validate|assert)/.test(
+      normalizedPrompt,
+    )
+  ) {
+    return "verification";
+  }
+
+  if (/(plan|outline|strategy)/.test(normalizedPrompt)) {
+    return "Plan";
+  }
+
+  if (
+    /(read|inspect|explore|search|list|summari[sz]e|explain|understand|analy[sz]e)/.test(
+      normalizedPrompt,
+    )
+  ) {
+    return "Explore";
+  }
+
+  return "general-purpose";
+}
+
+function buildClaudeTaskDescription(
+  prompt: string | undefined,
+  subagentType: string,
+): string {
+  const words = prompt?.match(/[A-Za-z0-9][A-Za-z0-9:/._-]*/g) ?? [];
+  if (words.length > 0) {
+    return words.slice(0, 6).join(" ");
+  }
+
+  switch (subagentType) {
+    case "Explore":
+      return "Explore the codebase";
+    case "verification":
+      return "Verify the result";
+    case "Plan":
+      return "Plan the task";
+    default:
+      return "Handle the task";
+  }
 }
 
 function normalizeToolId(value: unknown, index: number): string {
@@ -2089,6 +2311,7 @@ async function* translateAntigravityStreamToAnthropic(
 ): AsyncGenerator<AnthropicStreamEvent> {
   let started = false;
   let closed = false;
+  let emittedContent = false;
   let lastSnapshot: AntigravityNormalizedResponse | undefined;
   const textState = new Map<number, StreamTextState>();
   const thinkingState = new Map<number, StreamThinkingState>();
@@ -2141,6 +2364,7 @@ async function* translateAntigravityStreamToAnthropic(
       if (!openBlocks.has(index)) {
         yield* closeAntigravityBlocksBeforeIndex(openBlocks, index);
         openBlocks.add(index);
+        emittedContent = true;
         yield {
           event: "content_block_start",
           data: {
@@ -2270,6 +2494,15 @@ async function* translateAntigravityStreamToAnthropic(
     }
 
     if (explicitStopReason) {
+      if (!emittedContent) {
+        yield* emitEmptyAssistantFallback(openBlocks, {
+          input_tokens: snapshot.inputTokens,
+          output_tokens: snapshot.outputTokens,
+        });
+        closed = true;
+        break;
+      }
+
       yield* finalizeAntigravityStream(openBlocks, explicitStopReason, {
         input_tokens: snapshot.inputTokens,
         output_tokens: snapshot.outputTokens,
@@ -2286,9 +2519,48 @@ async function* translateAntigravityStreamToAnthropic(
           output_tokens: lastSnapshot.outputTokens,
         }
       : { input_tokens: 0, output_tokens: 0 };
+
+    if (!emittedContent) {
+      yield* emitEmptyAssistantFallback(openBlocks, usage);
+      return;
+    }
+
     const stopReason = lastSnapshot?.stopReason ?? "end_turn";
     yield* finalizeAntigravityStream(openBlocks, stopReason, usage);
   }
+}
+
+async function* emitEmptyAssistantFallback(
+  openBlocks: Set<number>,
+  usage: { input_tokens: number; output_tokens: number },
+): AsyncGenerator<AnthropicStreamEvent> {
+  yield* closeAntigravityBlocksBeforeIndex(openBlocks, 0);
+
+  yield {
+    event: "content_block_start",
+    data: {
+      type: "content_block_start",
+      index: 0,
+      content_block: {
+        type: "text",
+        text: "",
+      },
+    },
+  };
+
+  yield {
+    event: "content_block_delta",
+    data: {
+      type: "content_block_delta",
+      index: 0,
+      delta: {
+        type: "text_delta",
+        text: EMPTY_ASSISTANT_FALLBACK_TEXT,
+      },
+    },
+  };
+
+  yield* finalizeAntigravityStream(new Set([0]), "end_turn", usage);
 }
 
 function extractExplicitAntigravityStreamStopReason(
@@ -2375,10 +2647,71 @@ function preserveAntigravityStreamState(
     return block;
   });
 
+  if (content.length === 0) {
+    const restored = restoreAntigravityStreamBlocksFromState(
+      textState,
+      thinkingState,
+      toolState,
+    );
+    if (restored.length > 0) {
+      return {
+        ...snapshot,
+        content: restored,
+      };
+    }
+  }
+
   return {
     ...snapshot,
     content,
   };
+}
+
+function restoreAntigravityStreamBlocksFromState(
+  textState: Map<number, StreamTextState>,
+  thinkingState: Map<number, StreamThinkingState>,
+  toolState: Map<number, StreamToolState>,
+): AntigravityNormalizedResponse["content"] {
+  const indexes = new Set<number>([
+    ...textState.keys(),
+    ...thinkingState.keys(),
+    ...toolState.keys(),
+  ]);
+
+  return [...indexes]
+    .sort((left, right) => left - right)
+    .flatMap((index): AnthropicAssistantContentBlock[] => {
+      const text = textState.get(index)?.text;
+      if (typeof text === "string" && text.length > 0) {
+        return [{ type: "text", text }];
+      }
+
+      const thinking = thinkingState.get(index);
+      if (thinking) {
+        return [
+          {
+            type: "thinking",
+            thinking: thinking.thinking,
+            ...(thinking.signature ? { signature: thinking.signature } : {}),
+          },
+        ];
+      }
+
+      const tool = toolState.get(index);
+      if (tool) {
+        return [
+          {
+            type: "tool_use",
+            id: tool.id,
+            name: tool.name,
+            input: normalizeJsonObject(tool.json),
+            ...(tool.signature ? { signature: tool.signature } : {}),
+          },
+        ];
+      }
+
+      return [];
+    });
 }
 
 async function* closeAntigravityBlocksBeforeIndex(
@@ -2736,6 +3069,67 @@ function createAnthropicErrorResponse(
   );
 }
 
+function summarizeAntigravityErrorMessage(
+  status: number,
+  body: string,
+): string {
+  const fallback =
+    body.trim() || `Antigravity request failed with status ${status}`;
+
+  try {
+    const payload = JSON.parse(body) as {
+      error?: {
+        message?: unknown;
+        status?: unknown;
+        details?: unknown;
+      };
+    };
+
+    const message = payload.error?.message;
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message.trim();
+    }
+
+    const details = Array.isArray(payload.error?.details)
+      ? payload.error?.details
+      : [];
+    for (const detail of details) {
+      if (!detail || typeof detail !== "object") {
+        continue;
+      }
+
+      const description = (detail as { description?: unknown }).description;
+      if (typeof description === "string" && description.trim().length > 0) {
+        return description.trim();
+      }
+
+      const fieldViolations = Array.isArray(
+        (detail as { fieldViolations?: unknown }).fieldViolations,
+      )
+        ? ((detail as { fieldViolations: Array<{ description?: unknown }> })
+            .fieldViolations ?? [])
+        : [];
+      for (const violation of fieldViolations) {
+        if (
+          typeof violation?.description === "string" &&
+          violation.description.trim().length > 0
+        ) {
+          return violation.description.trim();
+        }
+      }
+    }
+
+    const errorStatus = payload.error?.status;
+    if (typeof errorStatus === "string" && errorStatus.trim().length > 0) {
+      return `Antigravity error: ${errorStatus.trim()}`;
+    }
+  } catch {
+    return fallback;
+  }
+
+  return fallback;
+}
+
 function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, delayMs));
@@ -2847,6 +3241,7 @@ export const __testExports = {
   extractAntigravityProjectId,
   resolveAntigravityProjectId,
   extractAntigravityRetryDelayMs,
+  summarizeAntigravityErrorMessage,
   ensureRequestThoughtSignature,
   extractExplicitAntigravityStreamStopReason,
   loadBundledAntigravityDefaults,

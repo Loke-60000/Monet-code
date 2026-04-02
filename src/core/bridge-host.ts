@@ -3,7 +3,11 @@ import { once } from "node:events";
 import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { AccountRecord, RunningBridge } from "./types.js";
+import type {
+  AccountRecord,
+  RoutedModelOption,
+  RunningBridge,
+} from "./types.js";
 import type {
   BridgeWorkerRequest,
   BridgeWorkerResponse,
@@ -38,8 +42,9 @@ export function resolveBridgeWorkerRuntime(
 }
 
 export async function startIsolatedAnthropicBridge(
-  providerId: AccountRecord["provider"],
-  account: AccountRecord,
+  activeAccountId: string,
+  accounts: AccountRecord[],
+  routedModels: RoutedModelOption[],
 ): Promise<RunningBridge> {
   const runtime = resolveBridgeWorkerRuntime();
   const worker = fork(runtime.modulePath, [], {
@@ -68,8 +73,9 @@ export async function startIsolatedAnthropicBridge(
       worker,
       {
         type: "start",
-        providerId,
-        account,
+        activeAccountId,
+        accounts,
+        routedModels,
       },
       stderrChunks,
     );

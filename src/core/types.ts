@@ -2,10 +2,7 @@ export type ProviderId = "copilot" | "antigravity";
 
 export type CopilotAccountType = "individual" | "business" | "enterprise";
 
-export type CopilotAuthMethod = "gh-cli" | "oauth-device" | "token";
-
 export interface CopilotAuthenticationOptions {
-  method: CopilotAuthMethod;
   accountType: CopilotAccountType;
   githubToken?: string;
 }
@@ -14,15 +11,17 @@ export interface BaseProviderConfig {
   login: string;
 }
 
-export interface ModelSelection {
-  primary: string;
-  small: string;
+export interface ClaudeModelOption {
+  id: string;
+  label: string;
+  description: string;
 }
 
 export interface AccountRecord {
   id: string;
   name: string;
   provider: ProviderId;
+  startupModel: string;
   createdAt: string;
   updatedAt: string;
   providerConfig: ProviderConfig;
@@ -55,27 +54,30 @@ export function isAntigravityProviderConfig(
   return "refreshToken" in config;
 }
 
-export interface ProfileRecord {
-  id: string;
-  name: string;
-  provider: ProviderId;
-  accountId: string;
-  createdAt: string;
-  updatedAt: string;
-  models: ModelSelection;
-}
-
 export interface MonetConfig {
-  version: 2;
-  activeProfileId?: string;
+  version: 3;
+  activeAccountId?: string;
   accounts: AccountRecord[];
-  profiles: ProfileRecord[];
 }
 
 export interface BackendModel {
   id: string;
   name: string;
   vendor: string;
+}
+
+export interface RoutedModelOption {
+  id: string;
+  actualModelId: string;
+  name: string;
+  vendor: string;
+  provider: ProviderId;
+  providerLabel: string;
+  accountId: string;
+  accountName: string;
+  login: string;
+  label: string;
+  description: string;
 }
 
 export interface RunningBridge {

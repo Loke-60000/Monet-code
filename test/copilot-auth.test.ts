@@ -126,6 +126,30 @@ test("resolveGitHubOAuthClientId prefers Monet-specific env", () => {
   }
 });
 
+test("resolveGitHubOAuthClientId falls back to the built-in client id", () => {
+  const originalMonet = process.env.MONET_GITHUB_OAUTH_CLIENT_ID;
+  const originalGithub = process.env.GITHUB_OAUTH_CLIENT_ID;
+
+  delete process.env.MONET_GITHUB_OAUTH_CLIENT_ID;
+  delete process.env.GITHUB_OAUTH_CLIENT_ID;
+
+  try {
+    assert.equal(resolveGitHubOAuthClientId(), "Iv1.b507a08c87ecfe98");
+  } finally {
+    if (originalMonet === undefined) {
+      delete process.env.MONET_GITHUB_OAUTH_CLIENT_ID;
+    } else {
+      process.env.MONET_GITHUB_OAUTH_CLIENT_ID = originalMonet;
+    }
+
+    if (originalGithub === undefined) {
+      delete process.env.GITHUB_OAUTH_CLIENT_ID;
+    } else {
+      process.env.GITHUB_OAUTH_CLIENT_ID = originalGithub;
+    }
+  }
+});
+
 test("fetchGitHubLogin retries with minimal fallback headers", async () => {
   const originalFetch = globalThis.fetch;
   const seenHeaders: Headers[] = [];

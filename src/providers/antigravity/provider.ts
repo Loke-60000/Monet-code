@@ -23,6 +23,7 @@ export function createAntigravityAccountRecord(
     id: slugify(name),
     name,
     provider: "antigravity",
+    startupModel: "",
     createdAt: now,
     updatedAt: now,
     providerConfig: {

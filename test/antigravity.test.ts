@@ -305,6 +305,103 @@ test("buildAntigravityRequest replays tool-use signatures onto Gemini function c
   ]);
 });
 
+test("buildAntigravityRequest carries thought signatures across tool_result trajectories", () => {
+  const signature = "h".repeat(64);
+  const payload: AnthropicMessagesPayload = {
+    model: "gemini-3.1-pro-high",
+    max_tokens: 1024,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "I should inspect the project before I answer.",
+            signature,
+          },
+          {
+            type: "tool_use",
+            id: "tool_task_1",
+            name: "Task",
+            input: { description: "Inspect the repository" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool_task_1",
+            content: "Inspection complete",
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool_task_2",
+            name: "Task",
+            input: { description: "Explain the code" },
+          },
+        ],
+      },
+    ],
+  };
+
+  const request = __testExports.buildAntigravityRequest(payload, "project-123");
+  const nestedRequest = request.body.request as Record<string, unknown>;
+  const contents = nestedRequest.contents as Array<Record<string, unknown>>;
+
+  assert.deepEqual(contents, [
+    {
+      role: "model",
+      parts: [
+        {
+          thought: true,
+          text: "I should inspect the project before I answer.",
+          thoughtSignature: signature,
+        },
+        {
+          functionCall: {
+            id: "tool_task_1",
+            name: "Task",
+            args: { description: "Inspect the repository" },
+          },
+          thoughtSignature: signature,
+        },
+      ],
+    },
+    {
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            id: "tool_task_1",
+            name: "Task",
+            response: { result: "Inspection complete" },
+          },
+        },
+      ],
+    },
+    {
+      role: "model",
+      parts: [
+        {
+          functionCall: {
+            id: "tool_task_2",
+            name: "Task",
+            args: { description: "Explain the code" },
+          },
+          thoughtSignature: signature,
+        },
+      ],
+    },
+  ]);
+});
+
 test("buildAntigravityRequest converts Claude thinking config into Antigravity thinking config", () => {
   const payload: AnthropicMessagesPayload = {
     model: "claude-sonnet-4-6",
@@ -364,6 +461,29 @@ test("extractAntigravityRetryDelayMs prefers Google RetryInfo delays", () => {
   );
 
   assert.equal(delayMs, 564.328338);
+});
+
+test("summarizeAntigravityErrorMessage extracts readable provider messages", () => {
+  const message = __testExports.summarizeAntigravityErrorMessage(
+    400,
+    JSON.stringify({
+      error: {
+        message: "Request contains an invalid argument.",
+        details: [
+          {
+            fieldViolations: [
+              {
+                field: "request.contents[0].parts[0]",
+                description: "contents[0] is invalid",
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  );
+
+  assert.equal(message, "Request contains an invalid argument.");
 });
 
 test("Antigravity backend retries short quota resets before surfacing a 429", async () => {
@@ -426,6 +546,7 @@ test("Antigravity backend retries short quota resets before surfacing a 429", as
       id: "account-1",
       name: "Antigravity account",
       provider: "antigravity",
+      startupModel: "",
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString(),
       providerConfig: {
@@ -506,7 +627,38 @@ test("normalizeAntigravityResponse maps Gemini candidates into Anthropic content
   assert.equal(normalized.outputTokens, 5);
 });
 
-test("normalizeAntigravityResponse preserves function-call signatures on tool_use blocks", () => {
+test("buildAnthropicMessageResponse falls back to a readable text block for empty turns", () => {
+  const normalized = __testExports.normalizeAntigravityResponse(
+    {
+      response: {
+        candidates: [
+          {
+            finishReason: "STOP",
+            content: { parts: [] },
+          },
+        ],
+      },
+    },
+    "gemini-3-flash-agent",
+  );
+
+  assert.deepEqual(normalized.content, []);
+
+  const response = __testExports.buildAnthropicMessageResponse(
+    normalized,
+    "gemini-3-flash-agent",
+  );
+
+  assert.deepEqual(response.content, [
+    {
+      type: "text",
+      text: "Antigravity returned no assistant content for this turn. Please retry.",
+    },
+  ]);
+  assert.equal(response.stop_reason, "end_turn");
+});
+
+test("normalizeAntigravityResponse synthesizes a thinking block for function-call signatures", () => {
   const signature = "u".repeat(64);
   const normalized = __testExports.normalizeAntigravityResponse(
     {
@@ -535,11 +687,63 @@ test("normalizeAntigravityResponse preserves function-call signatures on tool_us
 
   assert.deepEqual(normalized.content, [
     {
+      type: "thinking",
+      thinking: "",
+      signature,
+    },
+    {
       type: "tool_use",
       id: "tool_1",
       name: "Task",
-      input: { description: "Inspect files" },
+      input: {
+        description: "Inspect files",
+        subagent_type: "general-purpose",
+      },
       signature,
+    },
+  ]);
+  assert.equal(normalized.stopReason, "tool_use");
+});
+
+test("normalizeAntigravityResponse backfills Claude Task tool inputs", () => {
+  const normalized = __testExports.normalizeAntigravityResponse(
+    {
+      response: {
+        candidates: [
+          {
+            finishReason: "STOP",
+            content: {
+              parts: [
+                {
+                  functionCall: {
+                    id: "tool_1",
+                    name: "default_api:Task",
+                    args: {
+                      prompt:
+                        "Read the repository and explain what this codebase does.",
+                      subagent_type: "CodeAnalyzer",
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    "gemini-3-flash-agent",
+  );
+
+  assert.deepEqual(normalized.content, [
+    {
+      type: "tool_use",
+      id: "tool_1",
+      name: "default_api:Task",
+      input: {
+        prompt: "Read the repository and explain what this codebase does.",
+        subagent_type: "Explore",
+        description: "Read the repository and explain what",
+      },
     },
   ]);
   assert.equal(normalized.stopReason, "tool_use");
@@ -590,11 +794,35 @@ test("translateAntigravityStreamToAnthropic preserves function-call signatures o
   const toolStart = events.find(
     (event) =>
       event.event === "content_block_start" &&
-      event.data.index === 0 &&
+      event.data.index === 1 &&
       (event.data.content_block as Record<string, unknown>)?.type ===
         "tool_use",
   );
 
+  const thinkingStart = events.find(
+    (event) =>
+      event.event === "content_block_start" &&
+      event.data.index === 0 &&
+      (event.data.content_block as Record<string, unknown>)?.type ===
+        "thinking",
+  );
+
+  const thinkingSignature = events.find(
+    (event) =>
+      event.event === "content_block_delta" &&
+      event.data.index === 0 &&
+      ((event.data.delta as Record<string, unknown>)?.type ?? null) ===
+        "signature_delta",
+  );
+
+  assert.equal(
+    (thinkingStart?.data.content_block as Record<string, unknown>)?.type,
+    "thinking",
+  );
+  assert.equal(
+    (thinkingSignature?.data.delta as Record<string, unknown>)?.signature,
+    signature,
+  );
   assert.equal(
     (toolStart?.data.content_block as Record<string, unknown>)?.signature,
     signature,
@@ -771,6 +999,56 @@ test("translateAntigravityStreamToAnthropic preserves text across empty start an
   );
 });
 
+test("translateAntigravityStreamToAnthropic falls back to text for an empty assistant turn", async () => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  finishReason: "STOP",
+                  content: { parts: [] },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 16,
+                candidatesTokenCount: 0,
+              },
+            },
+          })}\n\n`,
+        ),
+      );
+      controller.close();
+    },
+  });
+
+  const events = [] as Array<{ event: string; data: Record<string, unknown> }>;
+  for await (const event of __testExports.translateAntigravityStreamToAnthropic(
+    stream,
+    "gemini-3-flash-agent",
+  )) {
+    events.push(event);
+  }
+
+  assert.equal(
+    (
+      events.find((event) => event.event === "content_block_delta")?.data
+        .delta as Record<string, unknown>
+    )?.text,
+    "Antigravity returned no assistant content for this turn. Please retry.",
+  );
+  assert.equal(
+    (
+      events.find((event) => event.event === "message_delta")?.data
+        .delta as Record<string, unknown>
+    )?.stop_reason,
+    "end_turn",
+  );
+});
+
 test("translateAntigravityStreamToAnthropic preserves prior text when the finish snapshot regresses to empty text", async () => {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -862,6 +1140,111 @@ test("translateAntigravityStreamToAnthropic preserves prior text when the finish
     ["hi"],
   );
   assert.equal(events.at(-2)?.event, "message_delta");
+  assert.equal(events.at(-1)?.event, "message_stop");
+});
+
+test("translateAntigravityStreamToAnthropic preserves tool_use across an empty finish snapshot", async () => {
+  const signature = "z".repeat(64);
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: "tool_1",
+                          name: "Task",
+                          args: { prompt: "Inspect files" },
+                        },
+                        thoughtSignature: signature,
+                      },
+                    ],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 20,
+              },
+              responseId: "resp_tool",
+            },
+          })}\n\n`,
+        ),
+      );
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: "" }],
+                  },
+                  finishReason: "STOP",
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 24,
+              },
+              responseId: "resp_tool",
+            },
+          })}\n\n`,
+        ),
+      );
+      controller.close();
+    },
+  });
+
+  const events = [] as Array<{ event: string; data: Record<string, unknown> }>;
+  for await (const event of __testExports.translateAntigravityStreamToAnthropic(
+    stream,
+    "gemini-3.1-pro-low",
+  )) {
+    events.push(event);
+  }
+
+  const toolStart = events.find(
+    (event) =>
+      event.event === "content_block_start" &&
+      event.data.index === 1 &&
+      (event.data.content_block as Record<string, unknown>)?.type ===
+        "tool_use",
+  );
+
+  const thinkingStart = events.find(
+    (event) =>
+      event.event === "content_block_start" &&
+      event.data.index === 0 &&
+      (event.data.content_block as Record<string, unknown>)?.type ===
+        "thinking",
+  );
+
+  assert.equal(
+    (thinkingStart?.data.content_block as Record<string, unknown>)?.type,
+    "thinking",
+  );
+
+  assert.deepEqual(toolStart?.data.content_block, {
+    type: "tool_use",
+    id: "tool_1",
+    name: "Task",
+    input: {},
+    signature,
+  });
+
+  const messageDelta = events.find((event) => event.event === "message_delta");
+  assert.equal(
+    (messageDelta?.data.delta as Record<string, unknown> | undefined)
+      ?.stop_reason,
+    "tool_use",
+  );
   assert.equal(events.at(-1)?.event, "message_stop");
 });
 

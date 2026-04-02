@@ -10,7 +10,7 @@ import type {
   MonetAuthFailureSnapshot,
   MonetAntigravityAuthFlow,
   MonetCopilotDeviceFlowSnapshot,
-  MonetProfileEditorSnapshot,
+  MonetStartupModelEditorSnapshot,
   MonetScreenHint,
 } from "./cli/MonetWorkbench.js";
 import type { MonetTerminalSession } from "./cli/ui/MonetTerminalApp.js";
@@ -50,8 +50,8 @@ class MonetCliApplication {
       case "auth":
         await this.runAuth(args[0]);
         return;
-      case "profiles":
-        await this.runProfiles();
+      case "accounts":
+        await this.runAccounts();
         return;
       case "use":
         await this.runUse(args[0]);
@@ -66,7 +66,7 @@ class MonetCliApplication {
 
   private async runInteractiveLoop(statusMessage?: string): Promise<void> {
     let nextStatus = statusMessage;
-    let editor: MonetProfileEditorSnapshot | undefined;
+    let startupModelEditor: MonetStartupModelEditorSnapshot | undefined;
     let copilotDeviceFlow: MonetCopilotDeviceFlowSnapshot | undefined;
     let antigravityAuth: MonetAntigravityAuthFlow | undefined;
     let authFailure: MonetAuthFailureSnapshot | undefined;
@@ -79,14 +79,14 @@ class MonetCliApplication {
       for (;;) {
         const snapshot = await this.workbench.createSnapshot(
           nextStatus,
-          editor,
+          startupModelEditor,
           copilotDeviceFlow,
           antigravityAuth?.snapshot,
           authFailure,
           suggestedScreen,
         );
         nextStatus = undefined;
-        editor = undefined;
+        startupModelEditor = undefined;
         copilotDeviceFlow = undefined;
         authFailure = undefined;
         suggestedScreen = undefined;
@@ -104,10 +104,7 @@ class MonetCliApplication {
               action.providerId,
               action.authOptions,
             );
-            editor = await this.workbench.prepareCreateProfile(account.id, {
-              defaultName: account.name,
-            });
-            nextStatus = `Saved account ${account.id}. Configure its first profile.`;
+            nextStatus = `Saved account ${account.id}.`;
           } catch (error) {
             authFailure = {
               providerId: action.providerId,
@@ -162,10 +159,7 @@ class MonetCliApplication {
           try {
             const account = await antigravityAuth.complete();
             antigravityAuth = undefined;
-            editor = await this.workbench.prepareCreateProfile(account.id, {
-              defaultName: account.name,
-            });
-            nextStatus = `Saved account ${account.id}. Configure its first profile.`;
+            nextStatus = `Saved account ${account.id}.`;
           } catch (error) {
             antigravityAuth = undefined;
             authFailure = {
@@ -210,10 +204,7 @@ class MonetCliApplication {
             const account = await this.workbench.completeCopilotDeviceFlow(
               action.flow,
             );
-            editor = await this.workbench.prepareCreateProfile(account.id, {
-              defaultName: account.name,
-            });
-            nextStatus = `Saved account ${account.id}. Configure its first profile.`;
+            nextStatus = `Saved account ${account.id}.`;
           } catch (error) {
             nextStatus =
               error instanceof Error
@@ -224,69 +215,46 @@ class MonetCliApplication {
           continue;
         }
 
-        if (action.type === "activate") {
-          const profile = await this.workbench.activateProfile(
-            action.profileId,
-          );
-          nextStatus = `Active profile set to ${profile.id}.`;
-          continue;
-        }
-
-        if (action.type === "open-create-profile") {
-          editor = await this.workbench.prepareCreateProfile(action.accountId);
-          continue;
-        }
-
-        if (action.type === "open-edit-profile") {
-          editor = await this.workbench.prepareEditProfile(action.profileId);
-          continue;
-        }
-
-        if (action.type === "cancel-editor") {
-          continue;
-        }
-
-        if (action.type === "save-created-profile") {
-          const profile = await this.workbench.createProfileFromDraft(
-            action.accountId,
-            {
-              name: action.name,
-              models: action.models,
-            },
-          );
-          nextStatus = `Saved profile ${profile.id} from existing account ${profile.accountId}.`;
-          continue;
-        }
-
-        if (action.type === "save-edited-profile") {
-          const profile = await this.workbench.updateProfileFromDraft(
-            action.profileId,
-            {
-              name: action.name,
-              models: action.models,
-            },
-          );
-          nextStatus = `Updated profile ${profile.id}.`;
-          continue;
-        }
-
-        if (action.type === "delete-profile") {
+        if (action.type === "open-startup-model-editor") {
           try {
-            await this.workbench.deleteProfile(action.profileId);
-            nextStatus = `Deleted profile ${action.profileId}.`;
+            startupModelEditor = await this.workbench.prepareStartupModelEditor(
+              action.accountId,
+            );
           } catch (error) {
             nextStatus =
               error instanceof Error
                 ? error.message
-                : "Profile deletion failed.";
+                : "Failed to load model list.";
+          }
+          continue;
+        }
+
+        if (action.type === "cancel-startup-model-editor") {
+          continue;
+        }
+
+        if (action.type === "save-startup-model") {
+          try {
+            const account = await this.workbench.updateStartupModel(
+              action.accountId,
+              action.modelId,
+            );
+            nextStatus = `Startup model set to ${account.startupModel}.`;
+          } catch (error) {
+            nextStatus =
+              error instanceof Error
+                ? error.message
+                : "Failed to update startup model.";
           }
           continue;
         }
 
         if (action.type === "delete-account") {
           try {
-            await this.workbench.deleteAccount(action.accountId);
-            nextStatus = `Deleted account ${action.accountId}.`;
+            const account = await this.workbench.deleteAccount(
+              action.accountId,
+            );
+            nextStatus = `Deleted account ${account.id}.`;
           } catch (error) {
             nextStatus =
               error instanceof Error
@@ -297,10 +265,7 @@ class MonetCliApplication {
         }
 
         session = await releaseTerminalSession(session);
-        const exitCode = await this.workbench.launchClaude(
-          action.profileId,
-          [],
-        );
+        const exitCode = await this.workbench.launchClaude(undefined, []);
         process.exitCode = exitCode;
         return;
       }
@@ -310,28 +275,27 @@ class MonetCliApplication {
   }
 
   private async runAuth(providerId?: string): Promise<void> {
-    const setup = await this.workbench.authenticateProvider(providerId);
-    process.stdout.write(
-      `\nSaved account ${setup.account.id} and profile ${setup.profile.id}.\n`,
-    );
+    const account =
+      await this.workbench.authenticateProviderAndSetup(providerId);
+    process.stdout.write(`\nSaved account ${account.id}.\n`);
   }
 
-  private async runProfiles(): Promise<void> {
-    process.stdout.write(await this.workbench.listProfilesAsText());
+  private async runAccounts(): Promise<void> {
+    process.stdout.write(await this.workbench.listAccountsAsText());
   }
 
-  private async runUse(profileId?: string): Promise<void> {
-    if (!profileId) {
-      throw new Error("Usage: monet use <profile-id>");
+  private async runUse(accountId?: string): Promise<void> {
+    if (!accountId) {
+      throw new Error("Usage: monet use <account-id>");
     }
 
-    const profile = await this.workbench.activateProfile(profileId);
-    process.stdout.write(`Active profile set to ${profile.id}.\n`);
+    const account = await this.workbench.activateAccount(accountId);
+    process.stdout.write(`Active account set to ${account.id}.\n`);
   }
 
   private async runCode(rawArgs: string[]): Promise<void> {
-    const { profileId, claudeArgs } = parseCodeArgs(rawArgs);
-    const exitCode = await this.workbench.launchClaude(profileId, claudeArgs);
+    const { accountId, claudeArgs } = parseCodeArgs(rawArgs);
+    const exitCode = await this.workbench.launchClaude(accountId, claudeArgs);
     process.exitCode = exitCode;
   }
 
@@ -345,13 +309,13 @@ class MonetCliApplication {
       `  monet ui                   Open the Monet terminal UI\n`,
     );
     process.stdout.write(
-      `  monet auth [provider-id]   Authenticate a provider and save a profile\n`,
+      `  monet auth [provider-id]   Authenticate a provider and save an account\n`,
     );
     process.stdout.write(
-      `  monet profiles             List saved Monet profiles\n`,
+      `  monet accounts             List saved Monet accounts\n`,
     );
     process.stdout.write(
-      `  monet use <profile-id>     Set the active profile\n`,
+      `  monet use <account-id>     Set the active account\n`,
     );
     process.stdout.write(
       `  monet code [args...]       Launch Claude Code through Monet\n`,
@@ -378,10 +342,10 @@ async function releaseTerminalSession(
 }
 
 function parseCodeArgs(args: string[]): {
-  profileId?: string;
+  accountId?: string;
   claudeArgs: string[];
 } {
-  let profileId: string | undefined;
+  let accountId: string | undefined;
   const claudeArgs: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -395,15 +359,15 @@ function parseCodeArgs(args: string[]): {
       break;
     }
 
-    if (current === "--profile") {
-      const nextProfileId = args[index + 1];
-      if (!nextProfileId) {
+    if (current === "--account") {
+      const nextAccountId = args[index + 1];
+      if (!nextAccountId) {
         throw new Error(
-          "Usage: monet code --profile <profile-id> [-- <claude args...>]",
+          "Usage: monet code --account <account-id> [-- <claude args...>]",
         );
       }
 
-      profileId = nextProfileId;
+      accountId = nextAccountId;
       index += 1;
       continue;
     }
@@ -411,7 +375,7 @@ function parseCodeArgs(args: string[]): {
     claudeArgs.push(current);
   }
 
-  return { profileId, claudeArgs };
+  return { accountId, claudeArgs };
 }
 
 const application = new MonetCliApplication();

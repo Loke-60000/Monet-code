@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import { startAnthropicBridge } from "./bridge.js";
+import { createRoutedBackend } from "./routed-backend.js";
 import type { RunningBridge } from "./types.js";
 import type {
   BridgeWorkerRequest,
   BridgeWorkerResponse,
 } from "./bridge-protocol.js";
 import { getProviderAdapter } from "../providers/index.js";
+import type { ProviderBackend } from "../providers/contracts.js";
 
 let bridge: RunningBridge | undefined;
 let didStart = false;
@@ -39,12 +41,40 @@ async function handleMessage(message: BridgeWorkerRequest): Promise<void> {
   didStart = true;
 
   try {
-    const adapter = getProviderAdapter(message.providerId);
-    if (!adapter) {
-      throw new Error(`Unsupported provider: ${message.providerId}`);
+    const activeAccount = message.accounts.find(
+      (account) => account.id === message.activeAccountId,
+    );
+    if (!activeAccount) {
+      throw new Error(
+        `Active bridge account ${message.activeAccountId} was not provided.`,
+      );
     }
 
-    const backend = await adapter.createBackend(message.account);
+    const accountBackends = new Map<string, ProviderBackend>();
+
+    for (const account of message.accounts) {
+      const adapter = getProviderAdapter(account.provider);
+      if (!adapter) {
+        throw new Error(`Unsupported provider: ${account.provider}`);
+      }
+
+      accountBackends.set(account.id, await adapter.createBackend(account));
+    }
+
+    const activeBackend = accountBackends.get(message.activeAccountId);
+    if (!activeBackend) {
+      throw new Error(
+        `No backend was created for active account ${message.activeAccountId}.`,
+      );
+    }
+
+    const activeModels = await activeBackend.listModels().catch(() => []);
+    const backend = createRoutedBackend({
+      activeAccountId: message.activeAccountId,
+      activeModels,
+      accountBackends,
+      routedModels: message.routedModels,
+    });
     bridge = await startAnthropicBridge(backend);
     send({ type: "ready", url: bridge.url });
   } catch (error) {

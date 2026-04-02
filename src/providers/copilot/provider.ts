@@ -1,10 +1,9 @@
-import { confirm, input, password, select } from "@inquirer/prompts";
+import { input, select } from "@inquirer/prompts";
 
 import { slugify } from "../../core/config.js";
 import type {
   AccountRecord,
   CopilotAccountType,
-  CopilotAuthMethod,
   CopilotAuthenticationOptions,
   MonetConfig,
 } from "../../core/types.js";
@@ -12,11 +11,8 @@ import type { ProviderAdapter } from "../contracts.js";
 import {
   CopilotBackend,
   fetchGitHubLogin,
-  hasGitHubCli,
   pollGitHubOAuthAccessToken,
-  readGitHubCliToken,
   resolveGitHubOAuthClientId,
-  runGitHubCliLogin,
   startGitHubOAuthDeviceFlow,
 } from "./api.js";
 import { inspectCopilotWithSdk } from "./sdk.js";
@@ -30,12 +26,11 @@ export class CopilotProviderAdapter implements ProviderAdapter {
     _config: MonetConfig,
     options?: CopilotAuthenticationOptions,
   ): Promise<AccountRecord> {
+    const accountType =
+      options?.accountType ?? (await this.promptForAccountType());
     const githubToken = await this.authenticateGitHubToken(options);
     const inspection = await inspectCopilotWithSdk(githubToken);
     const login = inspection.login ?? (await fetchGitHubLogin(githubToken));
-
-    const accountType =
-      options?.accountType ?? (await this.promptForAccountType());
 
     if (inspection.authType) {
       process.stdout.write(
@@ -58,6 +53,7 @@ export class CopilotProviderAdapter implements ProviderAdapter {
       id: slugify(name),
       name,
       provider: "copilot",
+      startupModel: "",
       createdAt: now,
       updatedAt: now,
       providerConfig: {
@@ -75,99 +71,24 @@ export class CopilotProviderAdapter implements ProviderAdapter {
   private async authenticateGitHubToken(
     options?: CopilotAuthenticationOptions,
   ): Promise<string> {
-    if (options) {
-      return this.authenticateGitHubTokenWithOptions(options);
+    const token = options?.githubToken?.trim();
+    if (token) {
+      return token;
     }
 
     const oauthClientId = resolveGitHubOAuthClientId();
-    const ghAvailable = await hasGitHubCli();
-    const choices: Array<{ name: string; value: CopilotAuthMethod }> = [];
-
-    if (ghAvailable) {
-      choices.push({
-        name: "Use GitHub CLI login (`gh auth token`)",
-        value: "gh-cli",
-      });
-    }
-
-    if (oauthClientId) {
-      choices.push({
-        name: "Use GitHub OAuth device flow",
-        value: "oauth-device",
-      });
-    }
-
-    choices.push({
-      name: "Paste a GitHub access token",
-      value: "token",
-    });
-
-    const method =
-      choices.length === 1
-        ? (choices[0]?.value ?? "token")
-        : await select<CopilotAuthMethod>({
-            message: "How should Monet get a GitHub token for Copilot?",
-            choices,
-          });
-
-    if (method === "gh-cli") {
-      return this.authenticateWithGitHubCli();
-    }
-
-    if (method === "oauth-device") {
-      if (!oauthClientId) {
-        throw new Error(
-          "GitHub OAuth device flow requires MONET_GITHUB_OAUTH_CLIENT_ID or GITHUB_OAUTH_CLIENT_ID.",
-        );
-      }
-
-      const device = await startGitHubOAuthDeviceFlow(oauthClientId);
-      process.stdout.write(
-        `\nOpen ${device.verification_uri} and enter code ${device.user_code}.\n\n`,
-      );
-
-      return pollGitHubOAuthAccessToken(device, oauthClientId);
-    }
-
-    const token = await password({
-      message: "GitHub access token",
-      validate: (value) => value.trim().length > 0 || "Token is required",
-    });
-
-    return token.trim();
-  }
-
-  private async authenticateGitHubTokenWithOptions(
-    options: CopilotAuthenticationOptions,
-  ): Promise<string> {
-    if (options.method === "gh-cli") {
-      return this.authenticateWithGitHubCli(false);
-    }
-
-    if (options.method === "oauth-device") {
-      const oauthClientId = resolveGitHubOAuthClientId();
-      if (!oauthClientId) {
-        throw new Error(
-          "GitHub OAuth device flow requires MONET_GITHUB_OAUTH_CLIENT_ID or GITHUB_OAUTH_CLIENT_ID.",
-        );
-      }
-
-      const device = await startGitHubOAuthDeviceFlow(oauthClientId);
-      process.stdout.write(
-        `\nOpen ${device.verification_uri} and enter code ${device.user_code}.\n\n`,
-      );
-
-      return pollGitHubOAuthAccessToken(device, oauthClientId);
-    }
-
-    const token = options.githubToken?.trim();
-    if (!token) {
+    if (!oauthClientId) {
       throw new Error(
-        "GitHub access token is required for Copilot token auth.",
+        "GitHub OAuth device flow requires MONET_GITHUB_OAUTH_CLIENT_ID or GITHUB_OAUTH_CLIENT_ID.",
       );
     }
 
-    return token;
+    const device = await startGitHubOAuthDeviceFlow(oauthClientId);
+    process.stdout.write(
+      `\nOpen ${device.verification_uri} and enter code ${device.user_code}.\n\n`,
+    );
+
+    return pollGitHubOAuthAccessToken(device, oauthClientId);
   }
 
   private async promptForAccountType(): Promise<CopilotAccountType> {
@@ -179,29 +100,5 @@ export class CopilotProviderAdapter implements ProviderAdapter {
         { name: "Enterprise", value: "enterprise" },
       ],
     });
-  }
-
-  private async authenticateWithGitHubCli(
-    allowInteractiveRecovery: boolean = true,
-  ): Promise<string> {
-    try {
-      return await readGitHubCliToken();
-    } catch (error) {
-      if (!allowInteractiveRecovery) {
-        throw error;
-      }
-
-      const shouldLogin = await confirm({
-        message: "GitHub CLI is not logged in. Run `gh auth login` now?",
-        default: true,
-      });
-
-      if (!shouldLogin) {
-        throw error;
-      }
-
-      await runGitHubCliLogin();
-      return readGitHubCliToken();
-    }
   }
 }

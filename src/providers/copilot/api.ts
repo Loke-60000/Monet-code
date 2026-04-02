@@ -1,6 +1,6 @@
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 
 import type { ChatCompletionsPayload } from "../../core/anthropic.js";
 import type {
@@ -11,9 +11,12 @@ import type {
 } from "../../core/types.js";
 import { isCopilotProviderConfig } from "../../core/types.js";
 import type { ProviderBackend } from "../contracts.js";
+import {
+  createCompletionsStreamFromResponses,
+  translateChatCompletionsToResponses,
+  translateResponsesResultToCompletions,
+} from "./responses.js";
 import { inspectCopilotWithSdk } from "./sdk.js";
-
-const execFileAsync = promisify(execFile);
 
 const GITHUB_BASE_URL = "https://github.com";
 const GITHUB_API_BASE_URL = "https://api.github.com";
@@ -21,10 +24,12 @@ const COPILOT_VERSION = "0.26.7";
 const EDITOR_PLUGIN_VERSION = `copilot-chat/${COPILOT_VERSION}`;
 const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`;
 const API_VERSION = "2025-04-01";
+const DEFAULT_GITHUB_OAUTH_CLIENT_ID = "Iv1.b507a08c87ecfe98";
 const GITHUB_OAUTH_CLIENT_ID_ENV_NAMES = [
   "MONET_GITHUB_OAUTH_CLIENT_ID",
   "GITHUB_OAUTH_CLIENT_ID",
 ] as const;
+const execFileAsync = promisify(execFile);
 
 export interface DeviceCodeResponse {
   device_code: string;
@@ -57,73 +62,7 @@ export function resolveGitHubOAuthClientId(): string | undefined {
     }
   }
 
-  return undefined;
-}
-
-export async function hasGitHubCli(): Promise<boolean> {
-  try {
-    await execFileAsync("gh", ["--version"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function readGitHubCliToken(): Promise<string> {
-  try {
-    const result = await execFileAsync("gh", [
-      "auth",
-      "token",
-      "--hostname",
-      "github.com",
-    ]);
-    const token = result.stdout.trim();
-
-    if (!token) {
-      throw new Error(
-        result.stderr.trim() || "GitHub CLI returned an empty token",
-      );
-    }
-
-    return token;
-  } catch (error) {
-    const detail = formatExecError(error);
-    throw new Error(
-      detail
-        ? `GitHub CLI did not return a token. ${detail}. Run \`gh auth login\` or choose another auth method.`
-        : "GitHub CLI did not return a token. Run `gh auth login` or choose another auth method.",
-    );
-  }
-}
-
-export async function runGitHubCliLogin(): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("gh", ["auth", "login", "--hostname", "github.com"], {
-      stdio: "inherit",
-    });
-
-    child.once("error", (error) => {
-      reject(new Error(`Failed to start GitHub CLI login: ${error.message}`));
-    });
-
-    child.once("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      if (signal) {
-        reject(new Error(`GitHub CLI login was interrupted (${signal})`));
-        return;
-      }
-
-      reject(
-        new Error(
-          `GitHub CLI login exited with code ${String(code ?? "unknown")}`,
-        ),
-      );
-    });
-  });
+  return DEFAULT_GITHUB_OAUTH_CLIENT_ID;
 }
 
 export async function startGitHubOAuthDeviceFlow(
@@ -252,6 +191,8 @@ export class CopilotBackend implements ProviderBackend {
 
   private modelsCache?: BackendModel[];
 
+  private readonly responsesOnlyModels = new Set<string>();
+
   private constructor(config: CopilotProviderConfig, vscodeVersion: string) {
     this.config = config;
     this.vscodeVersion = vscodeVersion;
@@ -280,13 +221,75 @@ export class CopilotBackend implements ProviderBackend {
   async createChatCompletions(
     payload: ChatCompletionsPayload,
   ): Promise<Response> {
-    return this.requestCopilot("/chat/completions", {
+    if (this.responsesOnlyModels.has(payload.model)) {
+      return this.createChatCompletionsViaResponses(payload);
+    }
+
+    try {
+      // Newer OpenAI models (o1, o3, gpt-5.*) require max_completion_tokens
+      // instead of the deprecated max_tokens parameter.
+      const { max_tokens, ...rest } = payload;
+      const copilotPayload =
+        max_tokens != null
+          ? { ...rest, max_completion_tokens: max_tokens }
+          : rest;
+
+      return await this.requestCopilot("/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(copilotPayload),
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.message.includes("unsupported_api_for_model") ||
+          error.message.includes("is not supported with this model"))
+      ) {
+        this.responsesOnlyModels.add(payload.model);
+        return this.createChatCompletionsViaResponses(payload);
+      }
+      throw error;
+    }
+  }
+
+  private async createChatCompletionsViaResponses(
+    payload: ChatCompletionsPayload,
+  ): Promise<Response> {
+    const responsesPayload = translateChatCompletionsToResponses(payload);
+    const response = await this.requestCopilot("/responses", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(responsesPayload),
     });
+
+    if (!payload.stream) {
+      const result: unknown = await response.json();
+      return new Response(
+        JSON.stringify(
+          translateResponsesResultToCompletions(result, payload.model),
+        ),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (!response.body) {
+      throw new Error(
+        "Copilot /responses returned no body for streaming request",
+      );
+    }
+
+    return new Response(
+      createCompletionsStreamFromResponses(response.body, payload.model),
+      {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
   }
 
   private async requestCopilot(
@@ -469,26 +472,4 @@ function formatHttpError(
   body: string | undefined,
 ): string {
   return body ? `${prefix} (${status}): ${body}` : `${prefix} (${status})`;
-}
-
-function formatExecError(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") {
-    return undefined;
-  }
-
-  const values = ["stderr", "stdout", "message"]
-    .map((key) => {
-      const value = Reflect.get(error, key);
-      return typeof value === "string" ? value.trim() : "";
-    })
-    .filter(
-      (value, index, array) =>
-        value.length > 0 && array.indexOf(value) === index,
-    );
-
-  if (values.length === 0) {
-    return undefined;
-  }
-
-  return values.join(" ");
 }

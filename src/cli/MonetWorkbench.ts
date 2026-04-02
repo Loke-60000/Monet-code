@@ -1,11 +1,9 @@
 import { slugify } from "../core/config.js";
-import type {
-  AccountRecord,
-  BackendModel,
-  CopilotAccountType,
-  CopilotAuthenticationOptions,
-  ModelSelection,
-  ProfileRecord,
+import {
+  type AccountRecord,
+  type BackendModel,
+  type CopilotAccountType,
+  type CopilotAuthenticationOptions,
 } from "../core/types.js";
 import { MonetLaunchService } from "./MonetLaunchService.js";
 import {
@@ -30,25 +28,14 @@ export interface MonetAccountSummary {
   name: string;
   provider: string;
   login: string;
-  profileCount: number;
-}
-
-export interface MonetProfileSummary {
-  id: string;
-  name: string;
-  provider: string;
-  accountId: string;
-  accountName: string;
-  login: string;
-  models: ModelSelection;
+  startupModel: string;
 }
 
 export interface MonetWorkbenchSnapshot {
-  activeProfileId?: string;
-  profiles: MonetProfileSummary[];
+  activeAccountId?: string;
   accounts: MonetAccountSummary[];
   providers: MonetProviderSummary[];
-  editor?: MonetProfileEditorSnapshot;
+  startupModelEditor?: MonetStartupModelEditorSnapshot;
   copilotDeviceFlow?: MonetCopilotDeviceFlowSnapshot;
   antigravityAuth?: MonetAntigravityAuthSnapshot;
   authFailure?: MonetAuthFailureSnapshot;
@@ -56,7 +43,7 @@ export interface MonetWorkbenchSnapshot {
   statusMessage?: string;
 }
 
-export type MonetScreenHint = "home" | "providers" | "accounts" | "profiles";
+export type MonetScreenHint = "home" | "providers" | "accounts";
 
 export interface MonetCopilotDeviceFlowSnapshot {
   accountType: CopilotAccountType;
@@ -91,20 +78,12 @@ export interface MonetAuthFailureSnapshot {
       };
 }
 
-export interface MonetProfileEditorSnapshot {
-  mode: "create" | "edit";
+export interface MonetStartupModelEditorSnapshot {
   accountId: string;
   accountName: string;
   login: string;
-  profileId?: string;
-  initialName: string;
-  initialModels: ModelSelection;
+  currentModel: string;
   availableModels: BackendModel[];
-}
-
-export interface AuthenticatedProfileResult {
-  account: AccountRecord;
-  profile: ProfileRecord;
 }
 
 export interface MonetProviderAuthOptions {
@@ -122,48 +101,25 @@ export class MonetWorkbench {
 
   async createSnapshot(
     statusMessage?: string,
-    editor?: MonetProfileEditorSnapshot,
+    startupModelEditor?: MonetStartupModelEditorSnapshot,
     copilotDeviceFlow?: MonetCopilotDeviceFlowSnapshot,
     antigravityAuth?: MonetAntigravityAuthSnapshot,
     authFailure?: MonetAuthFailureSnapshot,
     suggestedScreen?: MonetScreenHint,
   ): Promise<MonetWorkbenchSnapshot> {
     const config = await this.profiles.read();
-    const profileCounts = new Map<string, number>();
-
-    for (const profile of config.profiles) {
-      profileCounts.set(
-        profile.accountId,
-        (profileCounts.get(profile.accountId) ?? 0) + 1,
-      );
-    }
 
     return {
-      activeProfileId: config.activeProfileId,
-      profiles: config.profiles.map((profile) => {
-        const account = config.accounts.find(
-          (entry) => entry.id === profile.accountId,
-        );
-
-        return {
-          id: profile.id,
-          name: profile.name,
-          provider: profile.provider,
-          accountId: profile.accountId,
-          accountName: account?.name ?? "Unknown account",
-          login: account?.providerConfig.login ?? "unknown-login",
-          models: profile.models,
-        };
-      }),
+      activeAccountId: config.activeAccountId,
       accounts: config.accounts.map((account) => ({
         id: account.id,
         name: account.name,
         provider: account.provider,
         login: account.providerConfig.login,
-        profileCount: profileCounts.get(account.id) ?? 0,
+        startupModel: account.startupModel,
       })),
       providers: this.providers.list(),
-      editor,
+      startupModelEditor,
       copilotDeviceFlow,
       antigravityAuth,
       authFailure,
@@ -217,7 +173,6 @@ export class MonetWorkbench {
 
     return this.authenticateProviderAccount("copilot", {
       copilot: {
-        method: "token",
         accountType: flow.accountType,
         githubToken,
       },
@@ -268,184 +223,82 @@ export class MonetWorkbench {
     return this.saveAuthenticatedAccount(authenticatedAccount);
   }
 
-  async authenticateProvider(
+  async authenticateProviderAndSetup(
     providerId?: string,
     authOptions?: MonetProviderAuthOptions,
-  ): Promise<AuthenticatedProfileResult> {
-    const account = await this.authenticateProviderAccount(
-      providerId,
-      authOptions,
-    );
-    const profile = await this.createProfileFromAccount(account.id, {
-      defaultName: account.name,
-    });
-
-    return { account, profile };
+  ): Promise<AccountRecord> {
+    return this.authenticateProviderAccount(providerId, authOptions);
   }
 
-  async prepareCreateProfile(
+  async prepareStartupModelEditor(
     accountId: string,
-    options?: { defaultName?: string },
-  ): Promise<MonetProfileEditorSnapshot> {
+  ): Promise<MonetStartupModelEditorSnapshot> {
     const account = await this.requireAccount(accountId);
     const models = await this.listModelsForAccount(account);
-    const defaultName = options?.defaultName ?? `${account.name} profile`;
 
     return {
-      mode: "create",
       accountId: account.id,
       accountName: account.name,
       login: account.providerConfig.login,
-      initialName: defaultName,
-      initialModels: {
-        primary: models[0]?.id ?? "",
-        small: models[0]?.id ?? "",
-      },
+      currentModel: account.startupModel,
       availableModels: models,
     };
   }
 
-  async createProfileFromAccount(
+  async updateStartupModel(
     accountId: string,
-    options?: { defaultName?: string },
-  ): Promise<ProfileRecord> {
+    modelId: string,
+  ): Promise<AccountRecord> {
     const account = await this.requireAccount(accountId);
-    const models = await this.listModelsForAccount(account);
-    const selectedModels = await this.promptForModelSelection(models);
-    const { input } = await import("@inquirer/prompts");
-    const defaultName = options?.defaultName ?? `${account.name} profile`;
-    const name = await input({
-      message: "Profile name",
-      default: defaultName,
-      validate: (value) =>
-        value.trim().length > 0 || "Profile name is required",
-    });
 
-    return this.createProfileFromDraft(account.id, {
-      name,
-      models: selectedModels,
-    });
-  }
-
-  async createProfileFromDraft(
-    accountId: string,
-    draft: { name: string; models: ModelSelection },
-  ): Promise<ProfileRecord> {
-    const account = await this.requireAccount(accountId);
-    const existingProfiles = await this.profiles.listProfiles();
-    const now = new Date().toISOString();
-    const profile: ProfileRecord = {
-      id: createUniqueId(
-        draft.name,
-        existingProfiles.map((entry) => entry.id),
-      ),
-      name: draft.name.trim(),
-      provider: account.provider,
-      accountId,
-      createdAt: now,
-      updatedAt: now,
-      models: draft.models,
-    };
-
-    return this.profiles.saveProfile(profile);
-  }
-
-  async prepareEditProfile(
-    profileId: string,
-  ): Promise<MonetProfileEditorSnapshot> {
-    const profile = await this.requireProfile(profileId);
-    const account = await this.requireAccount(profile.accountId);
-    const models = await this.listModelsForAccount(account);
-
-    return {
-      mode: "edit",
-      accountId: account.id,
-      accountName: account.name,
-      login: account.providerConfig.login,
-      profileId: profile.id,
-      initialName: profile.name,
-      initialModels: profile.models,
-      availableModels: models,
-    };
-  }
-
-  async updateProfileFromDraft(
-    profileId: string,
-    draft: { name: string; models: ModelSelection },
-  ): Promise<ProfileRecord> {
-    const profile = await this.requireProfile(profileId);
-    const existingProfiles = (await this.profiles.listProfiles())
-      .filter((entry) => entry.id !== profile.id)
-      .map((entry) => entry.id);
-
-    return this.profiles.saveProfile({
-      ...profile,
-      id: createUniqueId(draft.name, existingProfiles, profile.id),
-      name: draft.name.trim(),
+    return this.profiles.saveAccount({
+      ...account,
+      startupModel: modelId,
       updatedAt: new Date().toISOString(),
-      models: draft.models,
     });
   }
 
-  async deleteProfile(profileId: string): Promise<void> {
-    await this.requireProfile(profileId);
-    await this.profiles.deleteProfile(profileId);
-  }
-
-  async deleteAccount(accountId: string): Promise<void> {
+  async deleteAccount(accountId: string): Promise<AccountRecord> {
     const account = await this.requireAccount(accountId);
-    const config = await this.profiles.read();
-    const profileCount = config.profiles.filter(
-      (profile) => profile.accountId === account.id,
-    ).length;
-
-    if (profileCount > 0) {
-      throw new Error(
-        `Cannot delete account ${account.name} while ${profileCount} profile(s) still use it`,
-      );
-    }
-
     await this.profiles.deleteAccount(accountId);
+    return account;
   }
 
-  async activateProfile(profileId: string): Promise<ProfileRecord> {
-    return this.profiles.activateProfile(profileId);
+  async activateAccount(accountId: string): Promise<AccountRecord> {
+    return this.profiles.activateAccount(accountId);
   }
 
   async launchClaude(
-    profileId: string | undefined,
+    accountId: string | undefined,
     claudeArgs: string[],
   ): Promise<number> {
-    const profile = profileId
-      ? await this.profiles.getProfileById(profileId)
-      : await this.profiles.getActiveProfile();
+    const account = accountId
+      ? await this.profiles.getAccountById(accountId)
+      : await this.profiles.getActiveAccount();
 
-    if (!profile) {
-      throw new Error(
-        "No active Monet profile found. Run `monet auth` first or choose a profile in the Monet UI.",
-      );
-    }
-
-    const account = await this.profiles.getAccountById(profile.accountId);
     if (!account) {
       throw new Error(
-        `Profile ${profile.id} references missing account ${profile.accountId}`,
+        "No active Monet account found. Run `monet auth` first or add an account in the Monet UI.",
       );
     }
 
-    return this.launcher.launch(profile, account, claudeArgs);
+    return this.launcher.launch(
+      account,
+      await this.profiles.listAccounts(),
+      claudeArgs,
+    );
   }
 
-  async listProfilesAsText(): Promise<string> {
+  async listAccountsAsText(): Promise<string> {
     const snapshot = await this.createSnapshot();
-    if (snapshot.profiles.length === 0) {
-      return "No Monet profiles saved. Run `monet` or `monet auth` first.\n";
+    if (snapshot.accounts.length === 0) {
+      return "No Monet accounts saved. Run `monet` or `monet auth` first.\n";
     }
 
-    return snapshot.profiles
-      .map((profile) => {
-        const marker = snapshot.activeProfileId === profile.id ? "*" : " ";
-        return `${marker} ${profile.id}  provider=${profile.provider}  account=${profile.accountName}  login=${profile.login}  model=${profile.models.primary}  small=${profile.models.small}`;
+    return snapshot.accounts
+      .map((account) => {
+        const marker = snapshot.activeAccountId === account.id ? "*" : " ";
+        return `${marker} ${account.id}  provider=${account.provider}  login=${account.login}  startup=${account.startupModel}`;
       })
       .join("\n")
       .concat("\n");
@@ -477,32 +330,6 @@ export class MonetWorkbench {
     return models;
   }
 
-  private async promptForModelSelection(
-    models: BackendModel[],
-    defaults?: ModelSelection,
-  ): Promise<ModelSelection> {
-    const { select } = await import("@inquirer/prompts");
-    const primary = await select<string>({
-      message: "Select the primary model Claude Code should use",
-      choices: models.map((model) => ({
-        name: `${model.id} (${model.vendor})`,
-        value: model.id,
-      })),
-      default: defaults?.primary,
-    });
-
-    const small = await select<string>({
-      message: "Select the small / fast model Claude Code should use",
-      choices: models.map((model) => ({
-        name: `${model.id} (${model.vendor})`,
-        value: model.id,
-      })),
-      default: defaults?.small ?? primary,
-    });
-
-    return { primary, small };
-  }
-
   private async requireAccount(accountId: string): Promise<AccountRecord> {
     const account = await this.profiles.getAccountById(accountId);
     if (!account) {
@@ -510,15 +337,6 @@ export class MonetWorkbench {
     }
 
     return account;
-  }
-
-  private async requireProfile(profileId: string): Promise<ProfileRecord> {
-    const profile = await this.profiles.getProfileById(profileId);
-    if (!profile) {
-      throw new Error(`Unknown profile: ${profileId}`);
-    }
-
-    return profile;
   }
 
   private async ensureUniqueAccountId(
@@ -560,7 +378,7 @@ function createUniqueId(
     reserved.delete(preferredId);
   }
 
-  const baseId = slugify(value) || "profile";
+  const baseId = slugify(value) || "account";
   if (!reserved.has(baseId)) {
     return baseId;
   }

@@ -1,9 +1,10 @@
-import type { AccountRecord, ProviderId } from "./types.js";
+import type { AccountRecord, RoutedModelOption } from "./types.js";
 
 export interface BridgeWorkerStartMessage {
   type: "start";
-  providerId: ProviderId;
-  account: AccountRecord;
+  activeAccountId: string;
+  accounts: AccountRecord[];
+  routedModels: RoutedModelOption[];
 }
 
 export interface BridgeWorkerShutdownMessage {
