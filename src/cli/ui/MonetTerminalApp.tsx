@@ -60,7 +60,14 @@ interface MonetTerminalAppProps {
   onResolve(action: MonetTerminalAction): void;
 }
 
+interface MonetQuote {
+  id: number;
+  quote: string;
+}
+
 const MONET_MASCOT = loadMonetMascot();
+const MONET_QUOTES = loadMonetQuotes();
+const MONET_VERSION = loadMonetVersion();
 
 function MonetTerminalApp({
   snapshot,
@@ -137,11 +144,20 @@ function MonetTerminalApp({
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Header
-        accountCount={snapshot.accounts.length}
-        providerCount={snapshot.providers.length}
-        statusMessage={snapshot.statusMessage}
-      />
+      {screen === "home" ? (
+        <HomeHero
+          activeAccount={selectedAccount?.name}
+          accountCount={snapshot.accounts.length}
+          providerCount={snapshot.providers.length}
+          statusMessage={snapshot.statusMessage}
+        />
+      ) : (
+        <CompactHeader
+          accountCount={snapshot.accounts.length}
+          providerCount={snapshot.providers.length}
+          statusMessage={snapshot.statusMessage}
+        />
+      )}
 
       {screen === "home" ? (
         <MenuCard
@@ -354,7 +370,7 @@ function MonetTerminalApp({
   );
 }
 
-function Header({
+function CompactHeader({
   accountCount,
   providerCount,
   statusMessage,
@@ -365,24 +381,140 @@ function Header({
 }): React.JSX.Element {
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Box>
-        <Box flexDirection="column" marginRight={2}>
-          {MONET_MASCOT.map((line, index) => (
-            <Text key={`mascot-${index}`} color="cyan">
-              {line}
-            </Text>
-          ))}
+      <Box flexDirection="column">
+        <Text bold color="cyan">
+          Monet Terminal
+        </Text>
+        <Text dimColor>
+          Providers: {providerCount} | Accounts: {accountCount}
+        </Text>
+        {statusMessage ? <Text color="green">{statusMessage}</Text> : null}
+      </Box>
+    </Box>
+  );
+}
+
+function HomeHero({
+  activeAccount,
+  accountCount,
+  providerCount,
+  statusMessage,
+}: {
+  activeAccount?: string;
+  accountCount: number;
+  providerCount: number;
+  statusMessage?: string;
+}): React.JSX.Element {
+  const columns = process.stdout.columns ?? 100;
+  const isHorizontal = columns >= 100;
+  const quoteCard = useMemo(() => pickMonetQuotes(1)[0], []);
+  const welcomeMessage = activeAccount ? `Welcome back, ${activeAccount}!` : "Welcome back!";
+  const detailLine = `Providers: ${providerCount} · Accounts: ${accountCount}`;
+
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Box
+        borderStyle="round"
+        borderColor="cyan"
+        flexDirection="column"
+      >
+        <Box paddingX={1} paddingTop={1}>
+          <Text>
+            <Text color="cyan">Monet</Text>
+            <Text dimColor>{` v${MONET_VERSION}`}</Text>
+          </Text>
         </Box>
-        <Box flexDirection="column">
-          <Text bold color="cyan">
-            Monet Terminal
-          </Text>
-          <Text dimColor>
-            Providers: {providerCount} | Accounts: {accountCount}
-          </Text>
-          {statusMessage ? <Text color="green">{statusMessage}</Text> : null}
+        <Box
+          flexDirection={isHorizontal ? "row" : "column"}
+          paddingX={1}
+          paddingBottom={1}
+          gap={1}
+        >
+          <Box
+            flexDirection="column"
+            justifyContent="space-between"
+            alignItems={isHorizontal ? "center" : "flex-start"}
+            minHeight={8}
+            width={isHorizontal ? "50%" : undefined}
+            flexGrow={1}
+          >
+            <Box marginTop={1}>
+              <Text bold>{welcomeMessage}</Text>
+            </Box>
+            <Box
+              flexDirection={isHorizontal ? "column" : "row"}
+              alignItems="center"
+            >
+              <Box flexDirection="column" marginRight={isHorizontal ? 0 : 2}>
+                {MONET_MASCOT.map((line, index) => (
+                  <Text key={`mascot-${index}`} color="cyan">
+                    {line}
+                  </Text>
+                ))}
+              </Box>
+              <Box
+                flexDirection="column"
+                alignItems={isHorizontal ? "center" : "flex-start"}
+              >
+                <Text color="cyan" bold>
+                  Monet
+                </Text>
+                <Text dimColor>Provider manager for Claude Code</Text>
+              </Box>
+            </Box>
+            <Box
+              flexDirection="column"
+              alignItems={isHorizontal ? "center" : "flex-start"}
+            >
+              <Text dimColor>{detailLine}</Text>
+              <Text dimColor>
+                {activeAccount
+                  ? `Active account · ${activeAccount}`
+                  : "Add an account to get started"}
+              </Text>
+            </Box>
+          </Box>
+
+          {isHorizontal ? (
+            <Box
+              height="100%"
+              borderStyle="single"
+              borderColor="cyan"
+              borderDimColor
+              borderTop={false}
+              borderBottom={false}
+              borderLeft={false}
+            />
+          ) : null}
+
+          <Box flexDirection="column" width={isHorizontal ? "50%" : undefined}>
+            {quoteCard ? <QuoteCard quote={quoteCard.quote} /> : null}
+          </Box>
         </Box>
       </Box>
+
+      {statusMessage ? (
+        <Box marginTop={1}>
+          <Text color="green">{statusMessage}</Text>
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
+function QuoteCard({ quote }: { quote: string }): React.JSX.Element {
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor="gray"
+      paddingX={1}
+      paddingY={0}
+      minHeight={8}
+      justifyContent="center"
+    >
+      <Text>{quote}</Text>
+      <Text dimColor>Claude Monet</Text>
     </Box>
   );
 }
@@ -398,6 +530,51 @@ function loadMonetMascot(): string[] {
   } catch {
     return ["Monet"];
   }
+}
+
+function loadMonetQuotes(): MonetQuote[] {
+  try {
+    const fileContents = readFileSync(
+      new URL("../../../assets/monet-quotes.json", import.meta.url),
+      "utf8",
+    );
+
+    return JSON.parse(fileContents) as MonetQuote[];
+  } catch {
+    return [
+      {
+        id: 0,
+        quote: "Color is my daylong obsession, joy, and torment.",
+      },
+    ];
+  }
+}
+
+function loadMonetVersion(): string {
+  try {
+    const fileContents = readFileSync(
+      new URL("../../../package.json", import.meta.url),
+      "utf8",
+    );
+
+    const parsed = JSON.parse(fileContents) as { version?: string };
+    return parsed.version ?? "0.1.0";
+  } catch {
+    return "0.1.0";
+  }
+}
+
+function pickMonetQuotes(count: number): MonetQuote[] {
+  if (MONET_QUOTES.length <= count) {
+    return MONET_QUOTES;
+  }
+
+  const daySeed = Math.floor(Date.now() / 86_400_000);
+  const startIndex = daySeed % MONET_QUOTES.length;
+
+  return Array.from({ length: count }, (_, index) => {
+    return MONET_QUOTES[(startIndex + index) % MONET_QUOTES.length]!;
+  });
 }
 
 function MenuCard<Value extends string>({
